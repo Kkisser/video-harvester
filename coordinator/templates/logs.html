@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Журнал{% endblock %}
+{% block content %}
+<h1>Журнал событий</h1>
+<form method="get" action="/logs" class="grid">
+  <label>Текст <input name="q" value="{{ filters.q }}"></label>
+  <label>Уровень
+    <select name="level"><option value="">Любой</option>
+      {% for value in ['INFO','WARNING','ERROR'] %}
+      <option value="{{ value }}" {% if filters.level == value %}selected{% endif %}>{{ value }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Job ID <input name="job_id" type="number" value="{{ filters.job_id }}"></label>
+  <label>Сервер <input name="worker_id" value="{{ filters.worker_id }}"></label>
+  <label>External ID <input name="external_id" type="number" value="{{ filters.external_id }}"></label>
+  <label>Результат <input name="result" value="{{ filters.result }}"></label>
+  <label>От UTC <input name="from_ts" type="datetime-local" value="{{ filters.from_ts }}"></label>
+  <label>До UTC <input name="to_ts" type="datetime-local" value="{{ filters.to_ts }}"></label>
+  <button>Искать</button>
+</form>
+<table>
+  <tr><th>UTC</th><th>Уровень</th><th>Компонент</th><th>Операция</th><th>Результат</th>
+      <th>Job</th><th>Сервер</th><th>Блок</th><th>ID</th><th>Код</th><th>Сообщение</th></tr>
+  {% for event in events %}
+  <tr><td>{{ event.ts }}</td><td>{{ event.level }}</td><td>{{ event.component }}</td>
+      <td>{{ event.operation }}</td><td>{{ event.result or '' }}</td>
+      <td>{{ event.job_id or '' }}</td><td>{{ event.worker_id or '' }}</td>
+      <td>{{ event.chunk_id or '' }}</td><td>{{ event.external_id or '' }}</td>
+      <td>{{ event.error_code or '' }}</td><td>{{ event.message or '' }}</td></tr>
+  {% endfor %}
+  {% if not events %}<tr><td colspan="11">Событий не найдено.</td></tr>{% endif %}
+</table>
+{% endblock %}

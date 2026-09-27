@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Панель{% endblock %}
+{% block content %}
+<meta http-equiv="refresh" content="5">
+<h1>Задания</h1>
+{% if role in ['operator','administrator'] %}
+<form method="post" action="/jobs/create" class="grid">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Название <input name="name" value="demo" required></label>
+  <label>Диапазон <input name="range_text" value="[0,300]"></label>
+  <label>Размер блока <input name="chunk_size" type="number" value="30" min="1"></label>
+  <label>Общий RPS <input name="global_rate_limit_rps" type="number" value="30" min="0.1" step="0.1"></label>
+  <button>Создать</button>
+</form>
+{% endif %}
+<table>
+  <tr><th>ID</th><th>Название</th><th>Статус</th><th>Диапазон</th><th>Обработано</th>
+      <th>Найдено</th><th>Файлов</th><th>Ошибок</th><th>ID/с</th><th>Байт</th><th>ETA</th><th></th></tr>
+  {% for job in jobs %}
+  <tr>
+    <td>{{ job.id }}</td><td>{{ job.name }}</td><td class="{{ job.status }}">{{ job.status }}</td>
+    <td>{{ job.range_start }} … {{ job.range_end if job.range_end is not none else '∞' }}</td>
+    <td>{{ job.processed }}</td><td>{{ job.found }}</td><td>{{ job.completed }}</td>
+    <td>{{ job.errors }}</td><td>{{ job.ids_per_second }}</td><td>{{ job.downloaded_bytes }}</td>
+    <td>{{ job.eta_seconds if job.eta_seconds is not none else 'не определено' }}</td>
+    <td><a class="button" href="/jobs/{{ job.id }}">Открыть</a></td>
+  </tr>
+  {% endfor %}
+  {% if not jobs %}<tr><td colspan="12">Заданий пока нет.</td></tr>{% endif %}
+</table>
+
+<h2>Активные серверы</h2>
+<table>
+  <tr><th>Имя</th><th>Статус</th><th>Потоки</th><th>CPU %</th><th>RAM ГБ</th>
+      <th>Диск ГБ</th><th>ID/с</th><th>Байт/с</th><th>Загрузок</th></tr>
+  {% for worker in workers %}
+  <tr><td>{{ worker.name }}</td><td class="{{ worker.status }}">{{ worker.status }}</td>
+      <td>{{ worker.threads }}</td><td>{{ worker.cpu }}</td>
+      <td>{{ worker.ram_used }} / {{ worker.ram_total }}</td><td>{{ worker.disk_free }}</td>
+      <td>{{ worker.ids_per_second }}</td><td>{{ worker.bytes_per_second }}</td>
+      <td>{{ worker.active_downloads }}</td></tr>
+  {% endfor %}
+</table>
+{% endblock %}

@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Вход{% endblock %}
+{% block content %}
+<h1>Вход в координатор</h1>
+{% if error %}<p class="failed">{{ error }}</p>{% endif %}
+<form method="post" action="/login" class="grid" style="max-width:420px">
+  <label>Логин <input name="username" required autofocus></label>
+  <label>Пароль <input name="password" type="password" required></label>
+  <button type="submit">Войти</button>
+</form>
+<p class="muted">Пароли задаются только переменными окружения.</p>
+{% endblock %}

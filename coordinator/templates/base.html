@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Координатор{% endblock %}</title>
+  <style>
+    :root { --bg:#f5f6f8; --card:#fff; --line:#d9dde3; --blue:#245fcc; --text:#20242a; }
+    * { box-sizing:border-box; }
+    body { margin:0; font:14px system-ui,sans-serif; background:var(--bg); color:var(--text); }
+    header { display:flex; gap:18px; align-items:center; padding:12px 20px; background:#fff;
+             border-bottom:1px solid var(--line); }
+    header a { color:var(--blue); text-decoration:none; font-weight:600; }
+    header .space { flex:1; }
+    main { max-width:1180px; margin:auto; padding:20px; }
+    h1 { font-size:22px; } h2 { margin-top:28px; font-size:17px; }
+    table { width:100%; border-collapse:collapse; background:var(--card); margin:10px 0 24px; }
+    th,td { padding:8px; border:1px solid var(--line); text-align:left; vertical-align:top; }
+    th { background:#eef1f5; }
+    input,select { padding:7px; border:1px solid var(--line); border-radius:5px; max-width:220px; }
+    button,.button { padding:7px 11px; border:0; border-radius:5px; background:var(--blue);
+                     color:#fff; text-decoration:none; cursor:pointer; display:inline-block; }
+    form.inline { display:inline-block; margin:2px; }
+    form.grid { display:flex; flex-wrap:wrap; gap:8px; align-items:end; padding:12px;
+                background:#fff; border:1px solid var(--line); }
+    label { display:flex; flex-direction:column; gap:4px; }
+    .online,.running,.completed { color:#14733b; font-weight:600; }
+    .offline,.failed,.stopped,.forbidden { color:#b42318; font-weight:600; }
+    .created,.paused,.retry_wait { color:#9a6700; font-weight:600; }
+    .muted { color:#626b77; }
+  </style>
+</head>
+<body>
+  {% if user %}
+  <header>
+    <a href="/">Панель</a><a href="/servers">Серверы</a><a href="/logs">Журнал</a>
+    <span class="space"></span><span>{{ user }} · {{ role }}</span><a href="/logout">Выйти</a>
+  </header>
+  {% endif %}
+  <main>{% block content %}{% endblock %}</main>
+</body>
+</html>

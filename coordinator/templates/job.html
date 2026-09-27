@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Задание {{ job.id }}{% endblock %}
+{% block content %}
+<h1>Задание {{ job.id }} · {{ job.name }}</h1>
+<p>Статус: <span class="{{ job.status }}">{{ job.status }}</span> ·
+   диапазон {{ job.range_start }} … {{ job.range_end if job.range_end is not none else '∞' }} ·
+   блок {{ job.chunk_size }} · общий лимит {{ job.global_rate_limit_rps }} RPS</p>
+<p>Обработано {{ summary.processed }}, найдено {{ summary.found }},
+   файлов {{ summary.completed }}, ошибок {{ summary.errors }},
+   скорость {{ summary.ids_per_second }} ID/с.</p>
+
+{% if role in ['operator','administrator'] %}
+<p>
+  {% for action,label in [('start','Старт'),('pause','Пауза'),('resume','Продолжить'),('stop','Стоп'),('retry_failed','Повторить ошибки')] %}
+  <form class="inline" method="post" action="/jobs/{{ job.id }}/{{ action }}">
+    <input type="hidden" name="csrf" value="{{ csrf }}"><button>{{ label }}</button>
+  </form>
+  {% endfor %}
+  <a class="button" href="/jobs/{{ job.id }}/export">Экспорт CSV</a>
+</p>
+<form class="grid" method="post" action="/jobs/{{ job.id }}/update_rate">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Новый общий RPS <input name="rate" type="number" min="0.1" step="0.1" required></label>
+  <button>Изменить без остановки</button>
+</form>
+{% endif %}
+
+<h2>Элементы первые 300</h2>
+<table>
+  <tr><th>ID</th><th>Статус</th><th>HTTP</th><th>Название</th><th>Ошибка</th></tr>
+  {% for item in items %}
+  <tr><td>{{ item.external_id }}</td><td class="{{ item.status }}">{{ item.status }}</td>
+      <td>{{ item.http_status or '' }}</td><td>{{ item.title or '' }}</td>
+      <td>{{ item.error_code or '' }}</td></tr>
+  {% endfor %}
+</table>
+
+<h2>Последние события</h2>
+<table>
+  <tr><th>UTC</th><th>Уровень</th><th>Операция</th><th>Результат</th><th>Сервер</th><th>Блок</th></tr>
+  {% for event in events %}
+  <tr><td>{{ event.ts }}</td><td>{{ event.level }}</td><td>{{ event.operation }}</td>
+      <td>{{ event.result or '' }}</td><td>{{ event.worker_id or '' }}</td>
+      <td>{{ event.chunk_id or '' }}</td></tr>
+  {% endfor %}
+</table>
+{% endblock %}

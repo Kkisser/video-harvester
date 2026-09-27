@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Серверы{% endblock %}
+{% block content %}
+<meta http-equiv="refresh" content="5">
+<h1>Рабочие серверы</h1>
+<table>
+  <tr><th>Имя</th><th>Адрес</th><th>Статус</th><th>Версия</th><th>Потоки</th>
+      <th>CPU</th><th>RAM</th><th>Диск</th><th>Проверок</th><th>Загрузок</th>
+      <th>Последние ID и названия</th><th>Heartbeat</th><th>Действия</th></tr>
+  {% for worker in workers %}
+  <tr>
+    <td>{{ worker.name }}</td><td>{{ worker.host }}</td>
+    <td class="{{ worker.status }}">{{ worker.status }}</td><td>{{ worker.version }}</td>
+    <td>{{ worker.threads }}</td><td>{{ worker.cpu }}</td>
+    <td>{{ worker.ram_used }} / {{ worker.ram_total }}</td><td>{{ worker.disk_free }}</td>
+    <td>{{ worker.active_checks }}</td><td>{{ worker.active_downloads }}</td>
+    <td>{% for item in recent_items[worker.name] %}
+        <div>{{ item.external_id }} · {{ item.title or item.status }}</div>{% endfor %}</td>
+    <td>{{ worker.last_heartbeat or '-' }}</td>
+    <td>
+      {% if role == 'administrator' %}
+      {% for action,label in [('probe','Проверить'),('update','Обновить'),('disable','Отключить')] %}
+      <form class="inline" method="post" action="/servers/{{ worker.name }}/{{ action }}">
+        <input type="hidden" name="csrf" value="{{ csrf }}"><button>{{ label }}</button>
+      </form>
+      {% endfor %}
+      <form class="inline" method="post" action="/servers/{{ worker.name }}/threads">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input name="threads" type="number" min="1" max="256" value="{{ worker.threads }}" style="width:70px">
+        <button>Потоки</button>
+      </form>
+      <form class="inline" method="post" action="/servers/{{ worker.name }}/start">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input name="job_id" type="number" min="1" placeholder="job ID" style="width:80px" required>
+        <button>Запустить</button>
+      </form>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+
+{% if role == 'administrator' %}
+<h2>Добавить сервер</h2>
+<form class="grid" method="post" action="/servers/add">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Имя <input name="name" required></label><label>Host <input name="host" value="local"></label>
+  <label>SSH порт <input name="ssh_port" type="number" value="22"></label>
+  <label>SSH пользователь <input name="ssh_user"></label>
+  <label>Удалённый каталог <input name="remote_path"></label>
+  <label>Каталог файлов <input name="storage_path" value="./data"></label>
+  <label>Потоки <input name="threads" type="number" value="4" min="1"></label>
+  <button>Добавить</button>
+</form>
+{% endif %}
+{% endblock %}
