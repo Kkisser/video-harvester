@@ -11,15 +11,23 @@ os.environ.setdefault("AGENT_TOKEN", "unit-agent-token-123456789")
 from agent.agent import RateLimiter, backoff_delay, retry_after_seconds
 from agent.downloader import _safe_folder, normalize_name
 from coordinator.security import hash_password, verify_password
-from coordinator.service import can_transition, make_chunks, parse_cli_range, parse_range
+from coordinator.service import (
+    can_transition,
+    make_chunks,
+    parse_cli_range,
+    parse_range,
+)
 
 
-@pytest.mark.parametrize("text,expected", [
-    ("[10,20]", (10, 20)),
-    ("50", (0, 50)),
-    ("[100,]", (100, None)),
-    ("", (0, None)),
-])
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("[10,20]", (10, 20)),
+        ("50", (0, 50)),
+        ("[100,]", (100, None)),
+        ("", (0, None)),
+    ],
+)
 def test_range_formats(text, expected):
     assert parse_range(text) == expected
 
@@ -62,7 +70,7 @@ def test_rate_limiter_spaces_requests():
 
 
 def test_name_normalization_and_safe_path(tmp_path):
-    assert normalize_name('Лекция/5:*?') == "Лекция_5___"
+    assert normalize_name("Лекция/5:*?") == "Лекция_5___"
     assert len(normalize_name("я" * 500)) == 120
     folder = _safe_folder(str(tmp_path), 12345)
     assert tmp_path.resolve() in folder.parents

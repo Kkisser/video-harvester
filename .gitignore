@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.db
+*.db-*
+.env
+.env.*
+config.yaml
+certs/
+data/
+*.log
+.agent.lock
+.secrets/

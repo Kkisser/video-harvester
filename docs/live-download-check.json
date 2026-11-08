@@ -1,0 +1,14 @@
+{
+  "source": "https://kinescope.io/200810246",
+  "elapsed_seconds": 420.68,
+  "resumed_existing_partial_data": true,
+  "result": "completed",
+  "files": 1,
+  "errors": 0,
+  "file_size_bytes": 260333424,
+  "duration_seconds": 5428.003991,
+  "video": "H.264 640x360",
+  "audio": "AAC",
+  "evidence": "Сводка успешного живого прогона, сохранённая из вывода scripts/live_check.py перед последующим повтором. Время относится к этому прогону с докачкой, не ко всем предшествующим попыткам.",
+  "followup": "В результате того прогона сохранялся старый error_code от промежуточного обрыва. Очистка error_code исправлена; итоговый повтор с error_code=null отражён в live-check.json."
+}

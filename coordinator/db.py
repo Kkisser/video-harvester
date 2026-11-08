@@ -4,20 +4,33 @@ SQLite используется для простого лабораторног
 число конфликтов чтения и записи. DATABASE_URL можно заменить на PostgreSQL.
 Все отметки времени сохраняются в UTC.
 """
+
 import os
-from datetime import datetime
+from datetime import datetime, timezone
+from contextlib import contextmanager
 from pathlib import Path
 
 import yaml
 from sqlalchemy import (
-    BigInteger, Boolean, Column, DateTime, Float, ForeignKey, Integer,
-    String, Text, UniqueConstraint, create_engine, event,
+    BigInteger,
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    create_engine,
+    event,
+    text,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 
 def utcnow():
-    return datetime.utcnow()
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def load_config():
@@ -43,11 +56,14 @@ DATABASE_URL = CONFIG["coordinator"]["database_url"]
 
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {},
+    connect_args={"check_same_thread": False, "timeout": 30}
+    if DATABASE_URL.startswith("sqlite")
+    else {},
 )
 
 
 if DATABASE_URL.startswith("sqlite"):
+
     @event.listens_for(engine, "connect")
     def configure_sqlite(dbapi_connection, _connection_record):
         cursor = dbapi_connection.cursor()
@@ -96,7 +112,12 @@ class Worker(Base):
     enabled = Column(Boolean, default=True, nullable=False)
     status = Column(String, default="offline", nullable=False)
     threads = Column(Integer, default=4, nullable=False)
-    version = Column(String, default="1.0")
+    version = Column(String, default="2.0")
+    rps = Column(Float, default=20, nullable=False)
+    metrics_json = Column(Text, default="{}", nullable=False)
+    ram_limit_percent = Column(Float, default=95, nullable=False)
+    network_limit_mbps = Column(Float, default=0, nullable=False)
+    disk_limit_mbps = Column(Float, default=0, nullable=False)
     last_heartbeat = Column(DateTime, nullable=True)
     cpu = Column(Float, default=0)
     ram_used = Column(Float, default=0)
@@ -135,6 +156,19 @@ class Job(Base):
     __tablename__ = "jobs"
     id = Column(Integer, primary_key=True)
     name = Column(String, nullable=False)
+    source = Column(String, default="kinescope", nullable=False)
+    threads = Column(Integer, default=4, nullable=False)
+    max_connections = Column(Integer, default=8, nullable=False)
+    check_rate_rps = Column(Float, default=10, nullable=False)
+    download_rate_rps = Column(Float, default=10, nullable=False)
+    auto_assign = Column(Boolean, default=True, nullable=False)
+    next_range_start = Column(BigInteger, nullable=True)
+    no_worker_timeout = Column(Integer, default=120, nullable=False)
+    status_reason = Column(String, default="", nullable=False)
+    adaptive_factor = Column(Float, default=1, nullable=False)
+    recent_good = Column(Integer, default=0, nullable=False)
+    recent_bad = Column(Integer, default=0, nullable=False)
+    finished_at = Column(DateTime, nullable=True)
     range_start = Column(BigInteger, default=0, nullable=False)
     range_end = Column(BigInteger, nullable=True)
     chunk_size = Column(Integer, default=100, nullable=False)
@@ -171,6 +205,7 @@ class RangeChunk(Base):
     leased_by = Column(String, nullable=True)
     leased_at = Column(DateTime, nullable=True)
     lease_expires_at = Column(DateTime, nullable=True)
+    lease_token = Column(String, nullable=True)
     attempt = Column(Integer, default=0, nullable=False)
     created_at = Column(DateTime, default=utcnow, nullable=False)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
@@ -212,6 +247,7 @@ class Download(Base):
     item_id = Column(Integer, ForeignKey("items.id"), nullable=False)
     worker_name = Column(String, nullable=False)
     status = Column(String, default="queued", nullable=False)
+    lease_token = Column(String, default="legacy", nullable=False)
     attempt = Column(Integer, default=1, nullable=False)
     started_at = Column(DateTime, nullable=True)
     finished_at = Column(DateTime, nullable=True)
@@ -256,5 +292,35 @@ class AuditLog(Base):
     details = Column(Text, nullable=True)
 
 
+class RateBucket(Base):
+    __tablename__ = "rate_buckets"
+    key = Column(String, primary_key=True)
+    next_at = Column(Float, default=0, nullable=False)
+
+
+@contextmanager
+def transaction():
+    """SQLite's write lock spans the entire read/validate/write transaction.
+
+    Unlike threading.Lock this also serializes independent API processes.
+    """
+    session = Session()
+    try:
+        if DATABASE_URL.startswith("sqlite"):
+            session.execute(text("BEGIN IMMEDIATE"))
+        yield session
+        session.commit()
+    except BaseException:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
 def init_db():
+    # Versioned additive migration: existing rows and confirmed results survive.
+    # Back up the database before upgrading an existing deployment.
     Base.metadata.create_all(engine)
+    from coordinator.migrate import upgrade
+
+    upgrade(engine)
