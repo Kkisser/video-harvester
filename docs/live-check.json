@@ -1,0 +1,58 @@
+{
+  "source": "https://kinescope.io/200810246",
+  "elapsed_seconds": 6.22,
+  "job": {
+    "current_ids_per_second": 0.0,
+    "current_bytes_per_second": 0.0,
+    "active_servers": 1,
+    "active_threads": 1,
+    "id": 1,
+    "name": "Kinescope real integration",
+    "status": "completed",
+    "status_reason": "range_complete",
+    "source": "kinescope",
+    "threads": 1,
+    "range_start": 200810246,
+    "range_end": 200810246,
+    "processed": 1,
+    "found": 1,
+    "completed": 1,
+    "errors": 0,
+    "ids_per_second": 0.19,
+    "downloaded_bytes": 260333424,
+    "bytes_per_second": 50089848.84,
+    "pending": 0,
+    "oldest_pending_seconds": 0,
+    "eta_seconds": 0
+  },
+  "items": [
+    {
+      "external_id": 200810246,
+      "status": "completed",
+      "http_status": 200,
+      "title": "(SLIN-13) Вебинар по теме «Принципы работы современных компьютеров процессоры, память, накопители",
+      "error_code": null
+    }
+  ],
+  "transport": "HTTPS with verified local CA; separate coordinator and agent processes",
+  "ffprobe": {
+    "programs": [],
+    "stream_groups": [],
+    "streams": [
+      {
+        "codec_name": "h264",
+        "codec_type": "video",
+        "width": 640,
+        "height": 360
+      },
+      {
+        "codec_name": "aac",
+        "codec_type": "audio"
+      }
+    ],
+    "format": {
+      "duration": "5428.003991",
+      "size": "260333424"
+    }
+  }
+}

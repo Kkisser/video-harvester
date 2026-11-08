@@ -1,0 +1,33 @@
+{
+  "mode": "load",
+  "workers": 10,
+  "threads_per_worker": 12,
+  "ids": 240,
+  "elapsed_seconds": 7.967,
+  "peak_target_requests": 120,
+  "state": {
+    "id": 1,
+    "name": "load",
+    "status": "completed",
+    "status_reason": "range_complete",
+    "source": "mock",
+    "threads": 12,
+    "range_start": 0,
+    "range_end": 239,
+    "processed": 240,
+    "found": 0,
+    "completed": 0,
+    "errors": 0,
+    "ids_per_second": 31.04,
+    "downloaded_bytes": 0,
+    "bytes_per_second": 0.0,
+    "pending": 0,
+    "oldest_pending_seconds": 0,
+    "eta_seconds": 0
+  },
+  "unique_ids": 240,
+  "worker_killed": false,
+  "coordinator_restarted": false,
+  "lease_reclaims": 0,
+  "confirmed_before_restart": 0
+}

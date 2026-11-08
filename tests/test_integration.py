@@ -1,4 +1,6 @@
 import os
+import json
+import hashlib
 from datetime import datetime, timedelta
 
 import pytest
@@ -23,7 +25,12 @@ client = TestClient(coordinator_app.app)
 mock_client = TestClient(mock_app)
 ADMIN = ("admin", "admin-password")
 VIEWER = ("viewer", "viewer-password")
-AGENT_HEADERS = {"X-Agent-Token": os.environ["AGENT_TOKEN"]}
+TOKENS = {f"worker-0{i}": f"test-token-worker-{i}-1234567890" for i in range(1, 5)}
+os.environ["COORDINATOR_AGENT_TOKENS"] = json.dumps(TOKENS)
+
+
+def agent_headers(name):
+    return {"X-Agent-Token": TOKENS[name], "X-Agent-Name": name}
 
 
 @pytest.fixture(autouse=True)
@@ -38,13 +45,13 @@ def clean_database():
 def register(name, threads=4):
     response = client.post(
         "/api/agent/register",
-        headers=AGENT_HEADERS,
-        json={"name": name, "host": "local", "threads": threads, "version": "test"},
+        headers=agent_headers(name),
+        json={"name": name, "host": "local", "threads": threads, "version": "2.0"},
     )
     assert response.status_code == 200
     heartbeat = client.post(
         f"/api/agent/{name}/heartbeat",
-        headers=AGENT_HEADERS,
+        headers=agent_headers(name),
         json={"cpu": 1, "disk_free": 10},
     )
     assert heartbeat.status_code == 200
@@ -70,7 +77,7 @@ def create_job(range_text="[0,14]", chunk_size=5):
 def lease(name, job_id):
     response = client.post(
         f"/api/agent/{name}/lease",
-        headers=AGENT_HEADERS,
+        headers=agent_headers(name),
         json={"job_id": job_id},
     )
     assert response.status_code == 200
@@ -114,24 +121,36 @@ def test_repeated_progress_does_not_duplicate_item_or_file():
     payload = {
         "job_id": job_id,
         "chunk_id": chunk["chunk_id"],
+        "lease_token": chunk["lease_token"],
         "next_id": 8,
-        "items": [{
-            "external_id": 7,
-            "status": "completed",
-            "http_status": 200,
-            "title": "test",
-            "download_url": "/download/7",
-            "file": {"path": "data/worker-01/7/7/video.mp4", "size": 10,
-                     "mime": "video/mp4", "checksum": "abc"},
-        }],
+        "items": [
+            {
+                "external_id": 7,
+                "status": "completed",
+                "http_status": 200,
+                "title": "test",
+                "download_url": "/download/7",
+                "file": {
+                    "path": "data/worker-01/7/7/video.mp4",
+                    "size": 10,
+                    "mime": "video/mp4",
+                    "checksum": hashlib.sha256(b"test").hexdigest(),
+                },
+            }
+        ],
     }
     for _ in range(2):
         response = client.post(
-            "/api/agent/worker-01/progress", headers=AGENT_HEADERS, json=payload,
+            "/api/agent/worker-01/progress",
+            headers=agent_headers("worker-01"),
+            json=payload,
         )
         assert response.status_code == 200
     session = Session()
-    assert session.query(Item).filter(Item.job_id == job_id, Item.external_id == 7).count() == 1
+    assert (
+        session.query(Item).filter(Item.job_id == job_id, Item.external_id == 7).count()
+        == 1
+    )
     assert session.query(File).count() == 1
     session.close()
 
@@ -148,11 +167,14 @@ def test_database_survives_reinitialization():
 def test_thread_change_arrives_in_heartbeat():
     register("worker-01", threads=4)
     response = client.patch(
-        "/api/workers/worker-01", auth=ADMIN, json={"threads": 12},
+        "/api/workers/worker-01",
+        auth=ADMIN,
+        json={"threads": 12},
     )
     assert response.status_code == 200
     heartbeat = client.post(
-        "/api/agent/worker-01/heartbeat", headers=AGENT_HEADERS,
+        "/api/agent/worker-01/heartbeat",
+        headers=agent_headers("worker-01"),
         json={"cpu": 1, "disk_free": 10},
     )
     assert heartbeat.json()["desired_threads"] == 12

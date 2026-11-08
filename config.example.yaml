@@ -1,47 +1,33 @@
 coordinator:
   database_url: "sqlite:///coordinator.db"
-  lease_seconds: 20
-  min_free_space_gb: 0.1
+  lease_seconds: 30
+  heartbeat_seconds: 3
   cookie_secure: true
+  allow_test_source: false
 
 agent:
   coordinator_url: "https://localhost:8000"
-  target_url: "http://localhost:9000"
   ca_cert: "./certs/cert.pem"
   storage_path: "./data"
   threads: 4
-  rps: 20
-  request_timeout: 10
-  max_retries: 4
-  heartbeat_seconds: 5
-  progress_batch: 20
-  max_downloads: null
+  max_height: 720
 
 servers:
-  - name: "worker-01"
-    host: "local"
-    ssh_port: 22
-    ssh_user: ""
-    ssh_key_path: ""
-    remote_path: ""
-    storage_path: "./data/worker-01"
+  - name: worker-01
+    host: local
+    storage_path: ./data/worker-01
     threads: 4
-    min_free_space_gb: 0.1
-  - name: "worker-02"
-    host: "local"
-    ssh_port: 22
-    ssh_user: ""
-    ssh_key_path: ""
-    remote_path: ""
-    storage_path: "./data/worker-02"
+    rps: 10
+    min_free_space_gb: 1
+  - name: worker-02
+    host: local
+    storage_path: ./data/worker-02
     threads: 6
-    min_free_space_gb: 0.1
-  - name: "worker-03"
-    host: "local"
-    ssh_port: 22
-    ssh_user: ""
-    ssh_key_path: ""
-    remote_path: ""
-    storage_path: "./data/worker-03"
+    rps: 10
+    min_free_space_gb: 1
+  - name: worker-03
+    host: local
+    storage_path: ./data/worker-03
     threads: 8
-    min_free_space_gb: 0.1
+    rps: 10
+    min_free_space_gb: 1

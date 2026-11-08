@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Аудит действий</h1>
+<div class="table-wrap" data-live="audit"><table>
+<tr><th>UTC</th><th>Пользователь</th><th>Действие</th><th>Объект</th><th>Подробности</th></tr>
+{% for e in events %}<tr><td>{{ e.ts }}</td><td>{{ e.user }}</td><td>{{ e.action }}</td><td>{{ e.target or '' }}</td><td>{{ e.details or '' }}</td></tr>{% endfor %}
+</table></div>
+{% endblock %}

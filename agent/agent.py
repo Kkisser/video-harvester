@@ -1,396 +1,594 @@
-"""Рабочий агент распределённой системы."""
+"""Protocol 2 agent: control traffic stays independent from media transfers."""
+
 import argparse
+import fcntl
+import logging
 import os
 import random
+import shutil
+import signal
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from collections import Counter, deque
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+from datetime import datetime, timezone
 from pathlib import Path
-
 import httpx
 import psutil
 import yaml
+from dotenv import load_dotenv
+from common import PROTOCOL_VERSION
+from agent.http import TargetHTTP, SourceError, Cancelled
+from agent.sources import discover
+from agent.downloader import download_media
 
-from agent.downloader import download
+log = logging.getLogger("agent")
 
 
+def backoff_delay(attempt, base=0.5, cap=30):
+    return min(cap, base * 2**attempt) + random.uniform(0, base)
+
+
+def now():
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+
+
+# Retained small utility for local callers; production admission is coordinated.
 class RateLimiter:
-    """Общий для всех потоков агента интервал между запросами."""
-    def __init__(self, rps: float):
-        self.lock = threading.RLock()
-        self.last = 0.0
-        self.rps = 1.0
-        self.min_interval = 1.0
+    def __init__(self, rps):
+        self.lock = threading.Lock()
+        self.last = 0
         self.set_rps(rps)
 
-    def set_rps(self, rps: float):
-        with self.lock:
-            self.rps = max(float(rps), 0.1)
-            self.min_interval = 1.0 / self.rps
+    def set_rps(self, rps):
+        self.rps = max(float(rps), 0.01)
 
     def wait(self):
         with self.lock:
-            now = time.monotonic()
-            delay = self.min_interval - (now - self.last)
-            if delay > 0:
-                time.sleep(delay)
+            time.sleep(max(0, 1 / self.rps - (time.monotonic() - self.last)))
             self.last = time.monotonic()
-
-
-class AdaptiveController:
-    """Снижает RPS при большой доле 429 и 5xx, затем медленно восстанавливает."""
-    def __init__(self, limiter: RateLimiter, base_rps: float):
-        self.limiter = limiter
-        self.base_rps = base_rps
-        self.good = 0
-        self.bad = 0
-        self.lock = threading.Lock()
-
-    def set_base(self, value: float):
-        with self.lock:
-            self.base_rps = max(value, 0.1)
-            self.limiter.set_rps(min(self.limiter.rps, self.base_rps))
-
-    def report(self, status_code):
-        with self.lock:
-            if status_code == 429 or (status_code is not None and status_code >= 500):
-                self.bad += 1
-            else:
-                self.good += 1
-            total = self.good + self.bad
-            if total < 20:
-                return
-            bad_ratio = self.bad / total
-            if bad_ratio > 0.20:
-                self.limiter.set_rps(max(self.limiter.rps / 2, 0.5))
-            elif bad_ratio < 0.05:
-                self.limiter.set_rps(min(self.limiter.rps * 1.25, self.base_rps))
-            self.good = self.bad = 0
-
-
-def backoff_delay(attempt: int, base: float = 0.5, cap: float = 30.0):
-    return min(cap, base * (2 ** attempt)) + random.uniform(0, base)
-
-
-def retry_after_seconds(headers):
-    value = headers.get("retry-after") if headers else None
-    try:
-        return float(value) if value is not None else None
-    except ValueError:
-        return None
-
-
-def check_one(client: httpx.Client, base_url: str, video_id: int, timeout: int):
-    url = f"{base_url.rstrip('/')}/{video_id}"
-    try:
-        response = client.get(url, timeout=timeout)
-    except httpx.TimeoutException:
-        return {"external_id": video_id, "status": "retry_wait",
-                "http_status": None, "error_code": "timeout"}
-    except httpx.HTTPError as error:
-        return {"external_id": video_id, "status": "retry_wait",
-                "http_status": None, "error_code": type(error).__name__}
-
-    code = response.status_code
-    if code == 200:
-        try:
-            data = response.json()
-        except ValueError:
-            return {"external_id": video_id, "status": "failed",
-                    "http_status": 200, "error_code": "bad_json"}
-        return {
-            "external_id": video_id,
-            "status": "found",
-            "http_status": 200,
-            "title": data.get("title"),
-            "download_url": data.get("download_url"),
-            "mime": data.get("mime"),
-            "expected_size": data.get("size"),
-            "expected_checksum": data.get("checksum"),
-            "source_url": url,
-        }
-    if code == 404:
-        return {"external_id": video_id, "status": "not_found", "http_status": code}
-    if code in (401, 403):
-        return {"external_id": video_id, "status": "forbidden", "http_status": code}
-    if code == 429:
-        return {"external_id": video_id, "status": "rate_limited", "http_status": code,
-                "retry_after": retry_after_seconds(response.headers)}
-    if code >= 500:
-        return {"external_id": video_id, "status": "retry_wait", "http_status": code,
-                "error_code": f"http_{code}"}
-    return {"external_id": video_id, "status": "failed", "http_status": code,
-            "error_code": f"http_{code}"}
 
 
 def load_agent_config():
     path = Path(os.environ.get("CONFIG_PATH", "config.yaml"))
     if not path.exists():
         path = Path("config.example.yaml")
-    if path.exists():
-        with path.open(encoding="utf-8") as stream:
-            return (yaml.safe_load(stream) or {}).get("agent", {})
-    return {}
-
-
-class Agent:
-    def __init__(self, name: str, job_id: int, coordinator_url: str, target_url: str,
-                 token: str, storage_path: str, threads: int, rps: float,
-                 timeout: int, max_retries: int, heartbeat_seconds: int,
-                 progress_batch: int, max_downloads=None, ca_cert=None):
-        self.name = name
-        self.job_id = job_id
-        self.coordinator_url = coordinator_url.rstrip("/")
-        self.target_url = target_url.rstrip("/")
-        self.storage_path = storage_path
-        self.threads = threads
-        self.timeout = timeout
-        self.max_retries = max_retries
-        self.heartbeat_seconds = heartbeat_seconds
-        self.progress_batch = max(progress_batch, 1)
-        self.max_downloads = max_downloads
-        self.downloads_done = 0
-        self.check_limiter = RateLimiter(rps)
-        self.download_limiter = RateLimiter(max(rps / 4, 1))
-        self.adaptive = AdaptiveController(self.check_limiter, rps)
-        verify = ca_cert if ca_cert and Path(ca_cert).exists() else True
-        self.coordinator_client = httpx.Client(
-            headers={"X-Agent-Token": token}, verify=verify, timeout=30,
-        )
-        # Отдельный клиент принципиален: секрет координатора не уходит мишени.
-        self.target_client = httpx.Client(timeout=60)
-        self.lock = threading.Lock()
-        self.started_at = time.monotonic()
-        self.processed = 0
-        self.bytes_downloaded = 0
-        self.error_count = 0
-        self.active_checks = 0
-        self.active_downloads = 0
-        self.last_net = psutil.net_io_counters()
-        self.last_metric_time = time.monotonic()
-        Path(self.storage_path).mkdir(parents=True, exist_ok=True)
-
-    def _post(self, path: str, payload: dict):
-        response = self.coordinator_client.post(
-            f"{self.coordinator_url}{path}", json=payload,
-        )
-        response.raise_for_status()
-        return response.json()
-
-    def register(self):
-        return self._post("/api/agent/register", {
-            "name": self.name, "host": os.environ.get("AGENT_HOST", "local"),
-            "threads": self.threads, "version": "1.0",
-        })
-
-    def collect_metrics(self):
-        memory = psutil.virtual_memory()
-        disk = psutil.disk_usage(self.storage_path)
-        now = time.monotonic()
-        net = psutil.net_io_counters()
-        interval = max(now - self.last_metric_time, 0.001)
-        net_in = (net.bytes_recv - self.last_net.bytes_recv) / interval
-        net_out = (net.bytes_sent - self.last_net.bytes_sent) / interval
-        self.last_net = net
-        self.last_metric_time = now
-        elapsed = max(now - self.started_at, 0.001)
-        try:
-            load_avg = psutil.getloadavg()[0]
-        except (AttributeError, OSError):
-            load_avg = 0
-        try:
-            open_files = len(psutil.Process().open_files())
-        except (psutil.Error, OSError):
-            open_files = 0
-        with self.lock:
-            return {
-                "cpu": psutil.cpu_percent(interval=0.05),
-                "ram_used": round(memory.used / 1e9, 3),
-                "ram_total": round(memory.total / 1e9, 3),
-                "disk_free": round(disk.free / 1e9, 3),
-                "net_in": round(max(net_in, 0), 1),
-                "net_out": round(max(net_out, 0), 1),
-                "load_avg": round(load_avg, 2),
-                "open_files": open_files,
-                "active_connections": 0,
-                "uptime": round(elapsed, 1),
-                "ids_per_second": round(self.processed / elapsed, 2),
-                "bytes_per_second": round(self.bytes_downloaded / elapsed, 2),
-                "active_checks": self.active_checks,
-                "active_downloads": self.active_downloads,
-                "error_count": self.error_count,
-            }
-
-    def heartbeat(self):
-        response = self._post(
-            f"/api/agent/{self.name}/heartbeat", self.collect_metrics(),
-        )
-        self.threads = max(int(response.get("desired_threads", self.threads)), 1)
-        return response
-
-    def get_chunk(self):
-        return self._post(
-            f"/api/agent/{self.name}/lease", {"job_id": self.job_id},
-        )
-
-    def process_id(self, video_id: int):
-        result = None
-        for attempt in range(self.max_retries + 1):
-            self.check_limiter.wait()
-            with self.lock:
-                self.active_checks += 1
-            try:
-                result = check_one(self.target_client, self.target_url, video_id, self.timeout)
-            finally:
-                with self.lock:
-                    self.active_checks -= 1
-            self.adaptive.report(result.get("http_status"))
-            if result["status"] == "rate_limited":
-                time.sleep(result.get("retry_after") or backoff_delay(attempt))
-                continue
-            if result["status"] == "retry_wait" and attempt < self.max_retries:
-                time.sleep(backoff_delay(attempt))
-                continue
-            break
-
-        if result["status"] == "rate_limited":
-            result["status"] = "retry_wait"
-            result["error_code"] = "retry_limit_exhausted"
-
-        if result["status"] == "found" and result.get("download_url"):
-            with self.lock:
-                if self.max_downloads is not None and self.downloads_done >= self.max_downloads:
-                    result["status"] = "skipped"
-                    return result
-                self.downloads_done += 1
-                self.active_downloads += 1
-            try:
-                self.download_limiter.wait()
-                file_result = download(
-                    self.target_client, self.target_url, result["download_url"],
-                    self.storage_path, video_id, result,
-                )
-            finally:
-                with self.lock:
-                    self.active_downloads -= 1
-            if file_result["status"] == "completed":
-                result["status"] = "completed"
-                result["file"] = {
-                    "path": file_result["path"], "size": file_result.get("size", 0),
-                    "mime": file_result.get("mime", ""),
-                    "checksum": file_result.get("checksum", ""),
-                }
-                with self.lock:
-                    self.bytes_downloaded += file_result.get("size", 0)
-            else:
-                result["status"] = file_result["status"]
-                result["error_code"] = file_result.get("error_code")
-
-        with self.lock:
-            self.processed += 1
-            if result["status"] in {"failed", "retry_wait"}:
-                self.error_count += 1
-        return result
-
-    def run(self):
-        self.register()
-        idle = 0
-        while True:
-            chunk = None
-            try:
-                self.heartbeat()
-                lease = self.get_chunk()
-                chunk = lease.get("chunk")
-                if chunk is None:
-                    if lease.get("job_status") in {"completed", "stopped", "failed", "missing"}:
-                        return
-                    idle += 1
-                    time.sleep(min(idle + 1, 10))
-                    continue
-                idle = 0
-                self.threads = max(int(chunk.get("threads", self.threads)), 1)
-                allocated_rps = float(chunk.get("rps", self.check_limiter.rps))
-                self.adaptive.set_base(allocated_rps)
-                self.check_limiter.set_rps(allocated_rps)
-                identifiers = list(range(chunk["next_id"], chunk["range_end"] + 1))
-                aborted = False
-
-                for offset in range(0, len(identifiers), self.progress_batch):
-                    batch = identifiers[offset:offset + self.progress_batch]
-                    # Пустой progress сначала продлевает аренду перед медленной пачкой.
-                    self._post(f"/api/agent/{self.name}/progress", {
-                        "job_id": self.job_id, "chunk_id": chunk["chunk_id"],
-                        "next_id": batch[0], "items": [],
-                    })
-                    with ThreadPoolExecutor(max_workers=self.threads) as pool:
-                        results = list(pool.map(self.process_id, batch))
-                    progress = self._post(f"/api/agent/{self.name}/progress", {
-                        "job_id": self.job_id, "chunk_id": chunk["chunk_id"],
-                        "next_id": batch[-1] + 1, "items": results,
-                    })
-                    if progress.get("job_status") in {"stopped", "failed", "missing"}:
-                        self._post(
-                            f"/api/agent/{self.name}/fail", {"chunk_id": chunk["chunk_id"]},
-                        )
-                        aborted = True
-                        break
-                    self.heartbeat()
-                if not aborted:
-                    self._post(
-                        f"/api/agent/{self.name}/complete", {"chunk_id": chunk["chunk_id"]},
-                    )
-            except KeyboardInterrupt:
-                return
-            except httpx.HTTPError:
-                time.sleep(2)
-            except Exception:
-                with self.lock:
-                    self.error_count += 1
-                try:
-                    if chunk:
-                        self._post(
-                            f"/api/agent/{self.name}/fail", {"chunk_id": chunk["chunk_id"]},
-                        )
-                except httpx.HTTPError:
-                    pass
-                time.sleep(2)
-
-
-def build_agent():
-    config = load_agent_config()
-    parser = argparse.ArgumentParser(description="Рабочий агент")
-    parser.add_argument("name")
-    parser.add_argument("job_id", type=int)
-    parser.add_argument("--threads", type=int,
-                        default=int(os.environ.get("AGENT_THREADS", config.get("threads", 4))))
-    parser.add_argument("--rps", type=float,
-                        default=float(os.environ.get("AGENT_RPS", config.get("rps", 20))))
-    parser.add_argument("--max-downloads", type=int, default=None)
-    args = parser.parse_args()
-    token = os.environ.get("AGENT_TOKEN", "")
-    if len(token) < 16:
-        raise RuntimeError("AGENT_TOKEN должен содержать не менее 16 символов")
-    max_downloads = args.max_downloads
-    if max_downloads is None:
-        raw_limit = os.environ.get("MAX_DOWNLOADS", config.get("max_downloads"))
-        max_downloads = int(raw_limit) if raw_limit not in (None, "", "null") else None
-    return Agent(
-        name=args.name,
-        job_id=args.job_id,
-        coordinator_url=os.environ.get("COORDINATOR_URL", config.get("coordinator_url", "https://localhost:8000")),
-        target_url=os.environ.get("TARGET_URL", config.get("target_url", "http://localhost:9000")),
-        token=token,
-        storage_path=os.environ.get("STORAGE_PATH", config.get("storage_path", "./data")),
-        threads=args.threads,
-        rps=args.rps,
-        timeout=int(config.get("request_timeout", 10)),
-        max_retries=int(config.get("max_retries", 4)),
-        heartbeat_seconds=int(config.get("heartbeat_seconds", 5)),
-        progress_batch=int(config.get("progress_batch", 20)),
-        max_downloads=max_downloads,
-        ca_cert=config.get("ca_cert"),
+    return (
+        (yaml.safe_load(path.read_text()) or {}).get("agent", {})
+        if path.exists()
+        else {}
     )
 
 
+class Agent:
+    def __init__(
+        self,
+        name,
+        job_id,
+        coordinator_url,
+        token,
+        storage_path="./data",
+        threads=4,
+        heartbeat_seconds=3,
+        ca_cert=None,
+        test_target_url="http://localhost:9000",
+        max_height=720,
+        once=False,
+        **legacy,
+    ):
+        self.name = name
+        self.job_id = job_id
+        self.url = coordinator_url.rstrip("/")
+        self.token = token
+        self.storage_path = str(Path(storage_path).resolve())
+        Path(self.storage_path).mkdir(parents=True, exist_ok=True)
+        self.threads = threads
+        self.heartbeat_seconds = heartbeat_seconds
+        self.test_target_url = test_target_url
+        self.max_height = max_height
+        self.once = once
+        headers = {"X-Agent-Token": token, "X-Agent-Name": name}
+        verify = ca_cert or True
+        self.client = httpx.Client(
+            headers=headers, verify=verify, timeout=5, trust_env=False
+        )
+        self.heartbeat_client = httpx.Client(
+            headers=headers, verify=verify, timeout=5, trust_env=False
+        )
+        self.shutdown = threading.Event()
+        self.work_cancel = threading.Event()
+        self.lock = threading.RLock()
+        self.chunk = None
+        self.paused = False
+        self.lease_seconds = 30
+        self.last_control = time.monotonic()
+        self.current = {}
+        self.processed = 0
+        self.bytes_done = 0
+        self.error_count = 0
+        self.connections = 0
+        self.retries = 0
+        self.status_counts = Counter()
+        self.recent = deque(maxlen=200)
+        self.check_durations = deque(maxlen=200)
+        self.download_durations = deque(maxlen=200)
+        self.started = time.monotonic()
+        self.last_metrics = time.monotonic()
+        self.last_net = psutil.net_io_counters()
+        self.last_disk = psutil.disk_io_counters()
+        self.last_processed = 0
+        self.last_bytes = 0
+
+    def _request(self, path, payload, heartbeat=False, retry=True):
+        client = self.heartbeat_client if heartbeat else self.client
+        deadline = time.monotonic() + min(self.lease_seconds / 2, 15)
+        while True:
+            try:
+                r = client.post(self.url + path, json=payload)
+                if r.status_code in (401, 403, 409):
+                    raise Cancelled(f"control_{r.status_code}")
+                r.raise_for_status()
+                return r.json()
+            except httpx.HTTPError:
+                if not retry or time.monotonic() >= deadline or self.shutdown.is_set():
+                    raise
+                self.shutdown.wait(0.25)
+
+    def identity(self, chunk=None):
+        c = chunk or self.chunk
+        if not c:
+            raise Cancelled("no_lease")
+        return {key: c[key] for key in ("job_id", "chunk_id", "lease_token")}
+
+    def _post(self, action, data, chunk=None):
+        return self._request(
+            f"/api/agent/{self.name}/{action}", {**self.identity(chunk), **data}
+        )
+
+    def register(self):
+        r = self._request(
+            "/api/agent/register",
+            {
+                "name": self.name,
+                "version": PROTOCOL_VERSION,
+                "threads": self.threads,
+                "host": os.environ.get("AGENT_HOST", "local"),
+            },
+        )
+        self.heartbeat_seconds = float(r["heartbeat_seconds"])
+        self.lease_seconds = float(r["lease_seconds"])
+        self.storage_path = str(Path(r["storage_path"]).resolve())
+        Path(self.storage_path).mkdir(parents=True, exist_ok=True)
+        if not r["enabled"]:
+            log.warning("worker_disabled name=%s", self.name)
+        return r
+
+    def collect_metrics(self):
+        t = time.monotonic()
+        interval = max(t - self.last_metrics, 0.001)
+        elapsed = max(t - self.started, 0.001)
+        memory = psutil.virtual_memory()
+        disk = psutil.disk_usage(self.storage_path)
+        net = psutil.net_io_counters()
+        io = psutil.disk_io_counters()
+        proc = psutil.Process()
+        with self.lock:
+            current = [dict(v, external_id=k) for k, v in self.current.items()]
+            result = dict(
+                cpu=psutil.cpu_percent(),
+                ram_used=memory.used / 1e9,
+                ram_total=memory.total / 1e9,
+                swap_used=psutil.swap_memory().used / 1e9,
+                disk_free=disk.free / 1e9,
+                disk_total=disk.total / 1e9,
+                net_in=max(0, (net.bytes_recv - self.last_net.bytes_recv) / interval),
+                net_out=max(0, (net.bytes_sent - self.last_net.bytes_sent) / interval),
+                disk_read=max(0, (io.read_bytes - self.last_disk.read_bytes) / interval)
+                if io and self.last_disk
+                else 0,
+                disk_write=max(
+                    0, (io.write_bytes - self.last_disk.write_bytes) / interval
+                )
+                if io and self.last_disk
+                else 0,
+                load_avg=psutil.getloadavg()[0],
+                open_files=len(proc.open_files()),
+                active_connections=self.connections,
+                uptime=elapsed,
+                ids_per_second=(self.processed - self.last_processed) / interval,
+                bytes_per_second=(self.bytes_done - self.last_bytes) / interval,
+                active_checks=sum(v.get("phase") == "checking" for v in current),
+                active_downloads=sum(v.get("phase") == "downloading" for v in current),
+                current=current,
+                error_count=self.error_count,
+                error_ratio=sum(self.recent) / len(self.recent) if self.recent else 0,
+                http_requests=sum(self.status_counts.values()),
+                status_counts=dict(self.status_counts),
+                retries=self.retries,
+                mean_check_seconds=sum(self.check_durations) / len(self.check_durations)
+                if self.check_durations
+                else 0,
+                mean_download_seconds=sum(self.download_durations)
+                / len(self.download_durations)
+                if self.download_durations
+                else 0,
+            )
+            self.last_processed = self.processed
+            self.last_bytes = self.bytes_done
+            self.recent.clear()
+        self.last_metrics = t
+        self.last_net = net
+        self.last_disk = io
+        return result
+
+    def heartbeat(self):
+        with self.lock:
+            c = dict(self.chunk) if self.chunk else None
+        payload = self.collect_metrics()
+        payload["job_id"] = self.job_id
+        if c:
+            payload.update(self.identity(c))
+        r = self._request(
+            f"/api/agent/{self.name}/heartbeat", payload, heartbeat=True, retry=False
+        )
+        self.last_control = time.monotonic()
+        with self.lock:
+            self.threads = max(1, int(r["desired_threads"]))
+            self.paused = r["job_status"] == "paused"
+            if c and self.chunk and c["lease_token"] == self.chunk["lease_token"]:
+                if not r["enabled"] or not r["lease_renewed"]:
+                    self.work_cancel.set()
+        return r
+
+    def heartbeat_loop(self):
+        while not self.shutdown.is_set():
+            try:
+                self.heartbeat()
+            except Cancelled:
+                self.work_cancel.set()
+            except Exception:
+                log.warning("heartbeat_unavailable name=%s", self.name)
+                if time.monotonic() - self.last_control >= self.lease_seconds / 2:
+                    self.work_cancel.set()
+            self.shutdown.wait(self.heartbeat_seconds)
+
+    def admit(self, kind):
+        while True:
+            if self.work_cancel.is_set() or self.shutdown.is_set():
+                raise Cancelled()
+            try:
+                r = self._post("permit", {"kind": kind})
+            except (httpx.HTTPError, Cancelled):
+                self.work_cancel.set()
+                raise Cancelled()
+            if r["granted"]:
+                return
+            if self.work_cancel.wait(r["wait_seconds"] + random.uniform(0, 0.01)):
+                raise Cancelled()
+
+    def feedback(self, code):
+        with self.lock:
+            self.status_counts[str(code)] += 1
+        try:
+            self._post("feedback", {"status_code": code})
+        except (httpx.HTTPError, Cancelled):
+            self.work_cancel.set()
+            raise Cancelled()
+
+    def connection_metric(self, delta):
+        with self.lock:
+            self.connections += delta.get("connections", 0)
+            self.bytes_done += delta.get("bytes", 0)
+
+    def state(self, video_id, status, title=None, attempt=None):
+        with self.lock:
+            self.current.setdefault(video_id, {})["phase"] = status
+            if title:
+                self.current[video_id]["title"] = title
+        return self._post(
+            "state",
+            {
+                "external_id": video_id,
+                "status": status,
+                "title": title,
+                "attempt": attempt,
+            },
+        )
+
+    def file_progress(self, video_id, done, total):
+        with self.lock:
+            v = self.current.setdefault(video_id, {})
+            v.update(
+                bytes=done,
+                total=total,
+                progress=round(done / total * 100, 1) if total else None,
+            )
+
+    def process_id(self, video_id, http, chunk):
+        result = {"external_id": video_id, "status": "failed", "http_status": None}
+        attempts = []
+        metadata = None
+        try:
+            for attempt in range(chunk["max_retries"] + 1):
+                started = now()
+                downloading = False
+                try:
+                    self.state(video_id, "checking")
+                    t = time.monotonic()
+                    metadata = discover(
+                        http,
+                        chunk["source"],
+                        "https://kinescope.io"
+                        if chunk["source"] == "kinescope"
+                        else self.test_target_url,
+                        video_id,
+                    )
+                    with self.lock:
+                        self.check_durations.append(time.monotonic() - t)
+                    self.state(video_id, "found", metadata["title"])
+                    self.state(video_id, "download_queued", metadata["title"])
+                    downloading = True
+                    started = now()
+                    self.state(video_id, "downloading", metadata["title"], attempt + 1)
+                    t = time.monotonic()
+                    f = download_media(
+                        http,
+                        metadata,
+                        self.storage_path,
+                        video_id,
+                        chunk["min_free_space_gb"],
+                        self.max_height,
+                        lambda n, total: self.file_progress(video_id, n, total),
+                    )
+                    with self.lock:
+                        self.download_durations.append(time.monotonic() - t)
+                    attempts.append(
+                        dict(
+                            attempt=attempt + 1,
+                            status="completed",
+                            started_at=started,
+                            finished_at=now(),
+                        )
+                    )
+                    result.update(metadata)
+                    result.update(
+                        status="completed", http_status=200, error_code=None, file=f
+                    )
+                    break
+                except SourceError as e:
+                    result.update(http_status=e.status or None, error_code=e.code)
+                    if downloading:
+                        attempts.append(
+                            dict(
+                                attempt=attempt + 1,
+                                status="retry_wait"
+                                if e.retryable and attempt < chunk["max_retries"]
+                                else "failed",
+                                started_at=started,
+                                finished_at=now(),
+                                error_code=e.code,
+                            )
+                        )
+                    if e.status in (401, 403):
+                        result["status"] = "forbidden"
+                        break
+                    if e.status == 404:
+                        result["status"] = "not_found" if not metadata else "failed"
+                        break
+                    if not e.retryable or attempt == chunk["max_retries"]:
+                        result["status"] = "failed"
+                        break
+                    self.state(video_id, "retry_wait")
+                    with self.lock:
+                        self.retries += 1
+                    http.sleep(
+                        e.retry_after
+                        if e.retry_after is not None
+                        else backoff_delay(attempt)
+                    )
+            if metadata:
+                for k in (
+                    "title",
+                    "source_url",
+                    "download_url",
+                    "mime",
+                    "expected_size",
+                    "expected_checksum",
+                ):
+                    result[k] = metadata.get(k)
+            result["attempts"] = attempts
+            with self.lock:
+                self.processed += 1
+                bad = result["status"] == "failed"
+                self.error_count += int(bad)
+                self.recent.append(int(bad))
+            return result
+        except (httpx.HTTPError, Cancelled):
+            self.work_cancel.set()
+            raise Cancelled()
+        except (OSError, ValueError, TypeError, KeyError) as e:
+            # A persistent local/format error must not requeue the same block forever.
+            result.update(
+                status="failed", error_code=type(e).__name__, attempts=attempts
+            )
+            with self.lock:
+                self.processed += 1
+                self.error_count += 1
+                self.recent.append(1)
+            return result
+        finally:
+            with self.lock:
+                self.current.pop(video_id, None)
+
+    def process_chunk(self, chunk):
+        with self.lock:
+            self.chunk = chunk
+            self.work_cancel = threading.Event()
+            self.paused = False
+            self.threads = chunk["threads"]
+        self.storage_path = str(Path(chunk["storage_path"]).resolve())
+        Path(self.storage_path).mkdir(parents=True, exist_ok=True)
+        http = TargetHTTP(
+            timeout=chunk["request_timeout"],
+            max_connections=chunk["max_connections"],
+            test_source=chunk["source"] == "mock",
+            admit=self.admit,
+            feedback=self.feedback,
+            cancelled=self.work_cancel,
+            metrics=self.connection_metric,
+        )
+        skip = set(chunk["skip_ids"])
+        ids = iter(
+            i for i in range(chunk["next_id"], chunk["range_end"] + 1) if i not in skip
+        )
+        exhausted = False
+        futures = {}
+        try:
+            with ThreadPoolExecutor(max_workers=256) as pool:
+                while futures or not exhausted:
+                    if self.shutdown.is_set():
+                        self.work_cancel.set()
+                    while (
+                        not exhausted
+                        and not self.paused
+                        and not self.work_cancel.is_set()
+                        and len(futures) < self.threads
+                    ):
+                        if (
+                            shutil.disk_usage(self.storage_path).free
+                            < chunk["min_free_space_gb"] * 1e9
+                        ):
+                            self.paused = True
+                            break
+                        ident = next(ids, None)
+                        if ident is None:
+                            exhausted = True
+                            break
+                        futures[pool.submit(self.process_id, ident, http, chunk)] = (
+                            ident
+                        )
+                    if not futures:
+                        break
+                    done, _ = wait(futures, timeout=0.1, return_when=FIRST_COMPLETED)
+                    for f in done:
+                        ident = futures.pop(f)
+                        try:
+                            result = f.result()
+                            if not self.work_cancel.is_set():
+                                self._post("progress", {"items": [result]}, chunk)
+                        except (Cancelled, httpx.HTTPError):
+                            self.work_cancel.set()
+                        except Exception as e:
+                            log.error(
+                                "operation_failed id=%s type=%s",
+                                ident,
+                                type(e).__name__,
+                            )
+                            self.work_cancel.set()
+            if not self.work_cancel.is_set():
+                self._post("complete" if exhausted else "fail", {}, chunk)
+        finally:
+            http.close()
+            with self.lock:
+                self.chunk = None
+                self.current.clear()
+
+    def run(self):
+        self.register()
+        self.heartbeat()
+        hb = threading.Thread(target=self.heartbeat_loop, name="heartbeat", daemon=True)
+        hb.start()
+        try:
+            while not self.shutdown.is_set():
+                try:
+                    lease = self._request(
+                        f"/api/agent/{self.name}/lease", {"job_id": self.job_id}
+                    )
+                    if lease["chunk"]:
+                        self.process_chunk(lease["chunk"])
+                    elif self.once and lease["job_status"] in {
+                        "completed",
+                        "failed",
+                        "stopped",
+                        "missing",
+                    }:
+                        return
+                    else:
+                        self.shutdown.wait(1)
+                except (httpx.HTTPError, Cancelled) as e:
+                    log.warning("control_interrupted type=%s", type(e).__name__)
+                    self.shutdown.wait(1)
+        finally:
+            self.shutdown.set()
+            self.work_cancel.set()
+            hb.join(timeout=6)
+            self.client.close()
+            self.heartbeat_client.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Video Harvester agent 2")
+    parser.add_argument("name", nargs="?")
+    parser.add_argument("job_id", type=int, nargs="?")
+    parser.add_argument("--env-file", default=".env.agent")
+    parser.add_argument("--check", action="store_true")
+    parser.add_argument("--threads", type=int)
+    parser.add_argument("--once", action="store_true")
+    args = parser.parse_args()
+    load_dotenv(args.env_file, override=False)
+    if args.check:
+        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+            parser.error("Установите FFmpeg и ffprobe")
+        print("Python dependencies and FFmpeg: OK")
+        return
+    if not args.name or args.job_id is None:
+        parser.error("Нужны имя и job_id")
+    config = load_agent_config()
+    token = os.environ.get("AGENT_TOKEN", "")
+    if len(token) < 24:
+        parser.error("AGENT_TOKEN: минимум 24 символа")
+    url = os.environ.get(
+        "COORDINATOR_URL", config.get("coordinator_url", "https://localhost:8000")
+    )
+    if (
+        not url.startswith("https://")
+        and not os.environ.get("ALLOW_INSECURE_LOCAL_TEST") == "1"
+    ):
+        parser.error("Координатор должен использовать HTTPS")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+    )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    storage = os.environ.get(
+        "STORAGE_PATH", config.get("storage_path", f"./data/{args.name}")
+    )
+    agent = Agent(
+        args.name,
+        args.job_id,
+        url,
+        token,
+        storage,
+        args.threads or int(config.get("threads", 4)),
+        ca_cert=os.environ.get("CA_CERT", config.get("ca_cert")),
+        max_height=int(config.get("max_height", 720)),
+        test_target_url=os.environ.get("TEST_TARGET_URL", "http://localhost:9000"),
+        once=args.once,
+    )
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, lambda *_: (agent.shutdown.set(), agent.work_cancel.set()))
+    # A second local process must not impersonate an already-running worker.
+    lockpath = Path(storage).resolve()
+    lockpath.mkdir(parents=True, exist_ok=True)
+    with (lockpath / f".{args.name}.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            parser.error("Агент с этим именем уже запущен в данном каталоге")
+        agent.run()
+
+
 if __name__ == "__main__":
-    build_agent().run()
+    main()
+
+# Public utility retained for callers of protocol 1.
+from agent.http import retry_after_seconds as retry_after_seconds

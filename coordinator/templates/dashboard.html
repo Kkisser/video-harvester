@@ -1,19 +1,30 @@
 {% extends "base.html" %}
 {% block title %}Панель{% endblock %}
 {% block content %}
-<meta http-equiv="refresh" content="5">
+
 <h1>Задания</h1>
 {% if role in ['operator','administrator'] %}
 <form method="post" action="/jobs/create" class="grid">
   <input type="hidden" name="csrf" value="{{ csrf }}">
-  <label>Название <input name="name" value="demo" required></label>
-  <label>Диапазон <input name="range_text" value="[0,300]"></label>
+  <label>Название <input name="name" value="Проверка Kinescope" required></label>
+  <label>Диапазон <input name="range_text" value="[200810246,200810246]"></label>
   <label>Размер блока <input name="chunk_size" type="number" value="30" min="1"></label>
   <label>Общий RPS <input name="global_rate_limit_rps" type="number" value="30" min="0.1" step="0.1"></label>
-  <button>Создать</button>
+  <label>Потоков на сервер <input name="threads" type="number" value="4" min="1" max="256"></label>
+  <label>Соединений на сервер <input name="max_connections" type="number" value="8" min="1" max="256"></label>
+  <label>Проверки страниц, RPS <input name="check_rate_rps" type="number" value="5" min="0.1" step="0.1"></label>
+  <label>Запросы файлов, RPS <input name="download_rate_rps" type="number" value="5" min="0.1" step="0.1"></label>
+  <label>Тайм-аут, секунды <input name="request_timeout" type="number" value="10" min="1" max="300"></label>
+  <label>Повторных попыток <input name="max_retries" type="number" value="4" min="0" max="20"></label>
+  <label>Серверы через запятую <input name="worker_names" placeholder="Пусто — все, включая новые"></label>
+  <label>Лимит ID <input name="stop_after_ids" type="number" min="1" placeholder="Без ограничения"></label>
+  <label>Лимит времени, секунды <input name="stop_after_seconds" type="number" min="1" placeholder="Без ограничения"></label>
+  <label>Остановить после N отсутствующих <input name="stop_on_consecutive_missing" type="number" min="1" placeholder="Отключено"></label>
+  <label>Ожидание серверов, секунды <input name="no_worker_timeout" type="number" min="10" value="120"></label>
+  <button>Создать задание Kinescope</button>
 </form>
 {% endif %}
-<table>
+<div class="table-wrap" data-live="jobs"><table>
   <tr><th>ID</th><th>Название</th><th>Статус</th><th>Диапазон</th><th>Обработано</th>
       <th>Найдено</th><th>Файлов</th><th>Ошибок</th><th>ID/с</th><th>Байт</th><th>ETA</th><th></th></tr>
   {% for job in jobs %}
@@ -27,18 +38,18 @@
   </tr>
   {% endfor %}
   {% if not jobs %}<tr><td colspan="12">Заданий пока нет.</td></tr>{% endif %}
-</table>
+</table></div>
 
 <h2>Активные серверы</h2>
-<table>
+<div class="table-wrap" data-live="workers"><table>
   <tr><th>Имя</th><th>Статус</th><th>Потоки</th><th>CPU %</th><th>RAM ГБ</th>
       <th>Диск ГБ</th><th>ID/с</th><th>Байт/с</th><th>Загрузок</th></tr>
   {% for worker in workers %}
   <tr><td>{{ worker.name }}</td><td class="{{ worker.status }}">{{ worker.status }}</td>
-      <td>{{ worker.threads }}</td><td>{{ worker.cpu }}</td>
-      <td>{{ worker.ram_used }} / {{ worker.ram_total }}</td><td>{{ worker.disk_free }}</td>
+      <td>{{ worker.threads }}</td><td>{{ worker.cpu|round(1) }}</td>
+      <td>{{ worker.ram_used }} / {{ worker.ram_total }}</td><td>{{ worker.disk_free|round(2) }}</td>
       <td>{{ worker.ids_per_second }}</td><td>{{ worker.bytes_per_second }}</td>
       <td>{{ worker.active_downloads }}</td></tr>
   {% endfor %}
-</table>
+</table></div>
 {% endblock %}

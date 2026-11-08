@@ -1,0 +1,8 @@
+{
+  "login": true,
+  "create": true,
+  "start_pause_resume_stop": true,
+  "logs_empty_filters": true,
+  "mobile_body_overflow": false,
+  "console_errors": []
+}

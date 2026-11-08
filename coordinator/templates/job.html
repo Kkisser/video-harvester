@@ -2,12 +2,12 @@
 {% block title %}Задание {{ job.id }}{% endblock %}
 {% block content %}
 <h1>Задание {{ job.id }} · {{ job.name }}</h1>
-<p>Статус: <span class="{{ job.status }}">{{ job.status }}</span> ·
+<section data-live="job-status"><p>Статус: <span class="{{ job.status }}">{{ job.status }}</span> ·
    диапазон {{ job.range_start }} … {{ job.range_end if job.range_end is not none else '∞' }} ·
    блок {{ job.chunk_size }} · общий лимит {{ job.global_rate_limit_rps }} RPS</p>
 <p>Обработано {{ summary.processed }}, найдено {{ summary.found }},
    файлов {{ summary.completed }}, ошибок {{ summary.errors }},
-   скорость {{ summary.ids_per_second }} ID/с.</p>
+   скорость {{ summary.ids_per_second }} ID/с. Текущая скорость {{ summary.current_ids_per_second }} ID/с; загрузка {{ summary.current_bytes_per_second }} байт/с. Активных серверов {{ summary.active_servers }}, выполняемых ID {{ summary.active_threads }}. Причина состояния: {{ job.status_reason or "—" }}.</p></section>
 
 {% if role in ['operator','administrator'] %}
 <p>
@@ -25,23 +25,31 @@
 </form>
 {% endif %}
 
-<h2>Элементы первые 300</h2>
-<table>
+<form class="grid" method="post" action="/jobs/{{ job.id }}/assign">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<label>Имя сервера <input name="worker_name" required></label>
+<label>Потоки для этого задания <input name="threads" type="number" min="1" max="256" placeholder="Глобальное значение"></label>
+<button>Подключить или изменить</button></form>
+<form class="grid" method="post" action="/jobs/{{ job.id }}/threads">
+<input type="hidden" name="csrf" value="{{ csrf }}"><label>Глобальное число потоков <input name="threads" type="number" min="1" max="256" value="{{ job.threads }}"></label><button>Изменить</button></form>
+<h2>Элементы</h2>
+<form method="get" class="grid"><label>Статус <input name="status" value="{{ filter_status }}" placeholder="completed, failed…"></label><label>Пропустить записей <input name="offset" type="number" min="0" value="{{ offset }}"></label><button>Показать</button></form>
+<div class="table-wrap" data-live="items"><table>
   <tr><th>ID</th><th>Статус</th><th>HTTP</th><th>Название</th><th>Ошибка</th></tr>
   {% for item in items %}
   <tr><td>{{ item.external_id }}</td><td class="{{ item.status }}">{{ item.status }}</td>
       <td>{{ item.http_status or '' }}</td><td>{{ item.title or '' }}</td>
       <td>{{ item.error_code or '' }}</td></tr>
   {% endfor %}
-</table>
+</table></div>
 
 <h2>Последние события</h2>
-<table>
+<div class="table-wrap" data-live="events"><table>
   <tr><th>UTC</th><th>Уровень</th><th>Операция</th><th>Результат</th><th>Сервер</th><th>Блок</th></tr>
   {% for event in events %}
   <tr><td>{{ event.ts }}</td><td>{{ event.level }}</td><td>{{ event.operation }}</td>
       <td>{{ event.result or '' }}</td><td>{{ event.worker_id or '' }}</td>
       <td>{{ event.chunk_id or '' }}</td></tr>
   {% endfor %}
-</table>
+</table></div>
 {% endblock %}

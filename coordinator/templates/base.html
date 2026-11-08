@@ -28,15 +28,39 @@
     .offline,.failed,.stopped,.forbidden { color:#b42318; font-weight:600; }
     .created,.paused,.retry_wait { color:#9a6700; font-weight:600; }
     .muted { color:#626b77; }
+    .table-wrap { overflow:auto; max-width:100%; }
+    .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; }
+    .card { padding:16px; background:white; border:1px solid var(--line); border-radius:8px; }
+    .card strong { display:block; font-size:24px; margin-top:8px; }
+    details { margin:16px 0; } summary { cursor:pointer; padding:10px 0; }
+    progress { width:130px; } td { overflow-wrap:anywhere; }
+    code { background:#eef1f5; padding:2px 4px; }
+    @media(max-width:700px) { main {padding:10px;} header {flex-wrap:wrap;gap:10px;} }
+
   </style>
 </head>
 <body>
   {% if user %}
   <header>
-    <a href="/">Панель</a><a href="/servers">Серверы</a><a href="/logs">Журнал</a>
+    <a href="/">Панель</a><a href="/servers">Серверы</a><a href="/logs">Журнал</a>{% if role == "administrator" %}<a href="/audit">Аудит</a>{% endif %}
     <span class="space"></span><span>{{ user }} · {{ role }}</span><a href="/logout">Выйти</a>
   </header>
   {% endif %}
   <main>{% block content %}{% endblock %}</main>
+<script>
+// Refresh only live sections, preserving form inputs and keyboard focus.
+setInterval(async () => {
+ if(document.hidden) return;
+ try {
+  const r=await fetch(location.href,{credentials:'same-origin'});
+  if(!r.ok || r.url.includes('/login')) return;
+  const doc=new DOMParser().parseFromString(await r.text(),'text/html');
+  for(const next of doc.querySelectorAll('[data-live]')) {
+   const old=document.querySelector('[data-live="'+next.dataset.live+'"]');
+   if(old && !old.contains(document.activeElement))old.replaceWith(next);
+  }
+ } catch(e) { /* The last received data stays visible during a network interruption. */ }
+},3000);
+</script>
 </body>
 </html>

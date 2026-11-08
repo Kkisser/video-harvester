@@ -1,5 +1,8 @@
 """Локальный управляемый двойник видеосервиса."""
+
 import hashlib
+import os
+import asyncio
 import threading
 import time
 
@@ -8,7 +11,9 @@ from fastapi.responses import JSONResponse, Response
 
 
 app = FastAPI(title="Mock Target")
-RATE_LIMIT_PER_SECOND = 60
+RATE_LIMIT_PER_SECOND = int(os.environ.get("TEST_RATE_LIMIT", "60"))
+_active = 0
+_peak = 0
 _lock = threading.Lock()
 _recent_requests = []
 
@@ -77,17 +82,39 @@ def download_file(video_id: int, request: Request, disconnect_once: bool = False
     }
     if start:
         headers["Content-Range"] = f"bytes {start}-{total - 1}/{total}"
-    return Response(content=chunk, status_code=status, media_type="video/mp4", headers=headers)
+    return Response(
+        content=chunk, status_code=status, media_type="video/mp4", headers=headers
+    )
+
+
+@app.get("/test/metrics")
+def test_metrics():
+    return {"active": _active, "peak": _peak}
 
 
 @app.get("/{video_id}")
-def check_video(video_id: int, force_status: int | None = Query(default=None)):
+async def check_video(video_id: int, force_status: int | None = Query(default=None)):
+    global _active, _peak
+    delay = float(os.environ.get("TEST_RESPONSE_DELAY", "0"))
+    if delay:
+        _active += 1
+        _peak = max(_peak, _active)
+        try:
+            await asyncio.sleep(delay)
+        finally:
+            _active -= 1
+    if os.environ.get("TEST_FORCE_404") == "1":
+        return JSONResponse({"error": "not found"}, status_code=404)
     if force_status in {401, 403, 404, 429, 500}:
         headers = {"Retry-After": "1"} if force_status == 429 else None
-        return JSONResponse({"forced": force_status}, status_code=force_status, headers=headers)
+        return JSONResponse(
+            {"forced": force_status}, status_code=force_status, headers=headers
+        )
     if rate_limited():
         return JSONResponse(
-            {"error": "rate limited"}, status_code=429, headers={"Retry-After": "1"},
+            {"error": "rate limited"},
+            status_code=429,
+            headers={"Retry-After": "1"},
         )
     kind = classify(video_id)
     if kind == "not_found":
@@ -97,7 +124,7 @@ def check_video(video_id: int, force_status: int | None = Query(default=None)):
     if kind == "server_error":
         return JSONResponse({"error": "internal"}, status_code=500)
     if kind == "slow":
-        time.sleep(2)
+        await asyncio.sleep(2)
 
     body = file_bytes(video_id)
     checksum = hashlib.sha256(body).hexdigest()

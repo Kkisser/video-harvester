@@ -1,5 +1,7 @@
 """Минимальная безопасность лабораторного стенда."""
+
 import hashlib
+import json
 import hmac
 import os
 import secrets
@@ -102,8 +104,12 @@ def user_role(username: str) -> str:
             row.role_id
             for row in session.query(UserRole).filter(UserRole.user_id == user.id).all()
         ]
-        roles = session.query(Role).filter(Role.id.in_(role_ids)).all() if role_ids else []
-        return max((role.name for role in roles), key=lambda x: ROLE_ORDER[x], default="")
+        roles = (
+            session.query(Role).filter(Role.id.in_(role_ids)).all() if role_ids else []
+        )
+        return max(
+            (role.name for role in roles), key=lambda x: ROLE_ORDER[x], default=""
+        )
     finally:
         session.close()
 
@@ -113,7 +119,9 @@ def has_role(username: str, minimum: str) -> bool:
 
 
 def make_session(username: str) -> str:
-    return _serializer().dumps({"username": username, "csrf": secrets.token_urlsafe(24)})
+    return _serializer().dumps(
+        {"username": username, "csrf": secrets.token_urlsafe(24)}
+    )
 
 
 def read_session(token: str | None):
@@ -130,17 +138,34 @@ def verify_csrf(session_data: dict | None, form_token: str) -> bool:
     return bool(expected and hmac.compare_digest(expected, form_token or ""))
 
 
-def check_agent_token(token: str) -> bool:
-    expected = _required_secret("AGENT_TOKEN")
-    return hmac.compare_digest(token or "", expected)
+def check_agent_token(name: str, token: str) -> bool:
+    """Per-worker tokens; a list permits overlap during token rotation."""
+    raw = os.environ.get("COORDINATOR_AGENT_TOKENS", "{}")
+    path = os.environ.get("COORDINATOR_AGENT_TOKENS_FILE")
+    if path:
+        from pathlib import Path
+
+        raw = Path(path).read_text()
+    configured = json.loads(raw).get(name, [])
+    values = configured if isinstance(configured, list) else [configured]
+    return bool(
+        name
+        and token
+        and any(
+            isinstance(v, str) and len(v) >= 24 and hmac.compare_digest(token, v)
+            for v in values
+        )
+    )
 
 
 def api_role(minimum: str):
     """FastAPI-зависимость для защищённых пользовательских методов API."""
+
     def dependency(credentials: HTTPBasicCredentials = Depends(_basic)):
         if not authenticate(credentials.username, credentials.password):
             raise HTTPException(401, "неверный логин или пароль")
         if not has_role(credentials.username, minimum):
             raise HTTPException(403, "недостаточно прав")
         return credentials.username
+
     return dependency
